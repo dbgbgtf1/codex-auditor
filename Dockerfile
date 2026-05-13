@@ -6,6 +6,14 @@ LABEL description="Codex-based binary code audit"
 # 1) pacman 镜像
 COPY mirrorlist /etc/pacman.d/mirrorlist
 COPY archlinuxcn-mirrorlist /etc/pacman.d/archlinuxcn-mirrorlist
+ARG GLOBAL_MIRROR
+RUN cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.build-default && \
+    cp /etc/pacman.d/archlinuxcn-mirrorlist /etc/pacman.d/archlinuxcn-mirrorlist.build-default
+
+# 构建期可选启用海外源，最终镜像会在构建结束前恢复默认源配置
+RUN if [ -n "${GLOBAL_MIRROR:-}" ]; then \
+        sed -i 's/^# //' /etc/pacman.d/archlinuxcn-mirrorlist /etc/pacman.d/mirrorlist; \
+    fi
 
 # 2) 基础软件（尽量使用官方源）
 RUN pacman -Syu --noconfirm \
@@ -69,7 +77,13 @@ RUN chmod +x /init /tmux.sh && touch /root/.bash_profile && chsh -s /usr/bin/zsh
 # 7) 清理
 RUN rm -rf /tmp/* /var/tmp/* && history -c 2>/dev/null; true
 
-# 8) 写入history便于使用
+# 8) 还原构建期镜像源
+RUN if [ -n "${GLOBAL_MIRROR:-}" ]; then \
+        cp /etc/pacman.d/mirrorlist.build-default /etc/pacman.d/mirrorlist; \
+        cp /etc/pacman.d/archlinuxcn-mirrorlist.build-default /etc/pacman.d/archlinuxcn-mirrorlist; \
+    fi
+
+# 9) 写入history便于使用
 RUN echo 'codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.5' > /root/.histfile
 
 EXPOSE 8981 8982
