@@ -70,7 +70,7 @@ RUN chmod +x /init /tmux.sh && touch /root/.bash_profile && chsh -s /usr/bin/zsh
 RUN rm -rf /tmp/* /var/tmp/* && history -c 2>/dev/null; true
 
 # 8) 写入history便于使用
-RUN echo 'codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.4' > /root/.histfile
+RUN echo 'codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.5' > /root/.histfile
 
 EXPOSE 8981 8982
 WORKDIR /data/workspace
