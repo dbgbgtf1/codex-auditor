@@ -1,0 +1,16 @@
+model_provider = "docker-env"
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+
+[model_providers.docker-env]
+name = "docker-env"
+base_url = "https://llm.0rays.club/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+
+[[skills.config]]
+path = "/data/skills/"
+enabled = true
+
+[features]
+multi_agent = true
