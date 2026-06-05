@@ -22,10 +22,10 @@ RUN pacman -Syu --noconfirm \
     cmake pkgconf meson ninja abseil-cpp go qemu-full \
     unzip p7zip xz bzip2 tar zip libarchive tmux lrzsz \
     binutils strace lsof clang llvm-libs cppcheck patchelf \
-    python python-pip uv openai-codex procps-ng ipython \
+    python python-pip python-flask uv openai-codex procps-ng ipython \
     afl++ bear boost-libs debuginfod pwndbg libc++ \
     zsh zsh-syntax-highlighting zsh-autosuggestions \
-    net-tools iproute2 openbsd-netcat sudo rsync \
+    net-tools iproute2 openbsd-netcat sudo rsync gunicorn \
     && pacman -Scc --noconfirm
 
 RUN sed -i 's/#\(Color\)/\1/;s/^\(NoProgressBar\)/#\1/' /etc/pacman.conf && \
@@ -69,6 +69,7 @@ COPY configs/zshrc /root/.zshrc
 COPY configs/tmux.conf /root/.tmux.conf
 COPY configs/vimrc /root/.vimrc
 COPY configs/gdbinit /root/.gdbinit
+COPY webui/ /root/webui/
 COPY vim-plugins.tar.zst /tmp/vim-plugins.tar.zst
 COPY AGENTS.md /data/codex/AGENTS.md
 RUN chmod +x /init /tmux.sh && touch /root/.bash_profile && chsh -s /usr/bin/zsh root && \
