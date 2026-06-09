@@ -7,5 +7,6 @@
 ## 漏洞落地流程
 
 1. 在 ./archives 下新建目录 ./archives/{id}-{description}/
-2. 按照 ./archives/report_template 的格式在 ./archives/{id}-{description}/中编写漏洞报告和poc
+2. 按照 ./archives/report_template 的格式在 ./archives/{id}-{description}/中编写中文漏洞报告和poc
 3. 在 ./archives/known_findings.json 中追加这次的 report_template/candidate.json
+4. 不要止步于一个不可利用的低危漏洞，只有可能导致rce的漏洞才有价值

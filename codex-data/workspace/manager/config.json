@@ -1,8 +1,0 @@
-{
-  "workspace_root": "/data/workspace",
-  "audit_root": "/data/workspace/audit",
-  "state_dir": "manager/state",
-  "task_timeout_sec": 14400,
-  "codex_model": "gpt-5.5",
-  "codex_command": "codex exec --model {model} -C {workspace} --dangerously-bypass-approvals-and-sandbox -"
-}
