@@ -184,11 +184,9 @@ def iter_archived_reports(cfg, targets):
     for target in targets:
         archives = root / target / "archives"
         if not archives.exists() or not archives.is_dir():
-            log.warn(f"{archives} doesn't exist or is not a dir")
             continue
         for archive_dir in sorted(archives.iterdir(), key=lambda path: path.name):
             if not archive_dir.is_dir() or archive_dir.is_symlink():
-                log.warn(f"{archive_dir} is not a dir or is symlink")
                 continue
             report_path = archive_dir / "report.md"
             if report_path.is_file():
