@@ -7,10 +7,12 @@
 ```sh
 python3 manager/manager.py [--config manager/config.json] mining TARGET_FILE
 python3 manager/manager.py [--config manager/config.json] collect TARGET_FILE
+python3 manager/manager.py [--config manager/config.json] reset
 ```
 
 - `mining`：每 60 秒读取一次 `TARGET_FILE`，回收已结束的 mining 任务，按并发上限启动新任务，然后扫描归档报告。
 - `collect`：只扫描一次归档报告，不启动 agent。
+- `reset`：清空 `audit_root` 和 `state_dir` 目录内容；目录不存在时会创建空目录。
 - `--config`：JSON 配置路径。默认是 `manager/config.json`；文件不存在时会写入默认配置。
 
 ## 配置协议

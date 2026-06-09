@@ -136,6 +136,15 @@ def open_state(args):
     return cfg, conn
 
 
+def clear_directory_contents(path):
+    path.mkdir(parents=True, exist_ok=True)
+    for child in path.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
 def read_target_file(path):
     return [entry["target"] for entry in read_target_entries(path)]
 
@@ -510,6 +519,15 @@ def cmd_collect(args):
         log.info(f"{target}: {counts}, {target}_new: {new_counts}")
 
 
+def cmd_reset(args):
+    write_default_config(args.config)
+    cfg = load_config(args.config)
+
+    for path in (audit_root(cfg), state_dir(cfg)):
+        clear_directory_contents(path)
+        log.info(f"reset {path}")
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Open-source binary audit manager")
     parser.add_argument(
@@ -521,7 +539,7 @@ def build_arg_parser():
 
     sub = parser.add_subparsers(
         required=True,
-        metavar="{mining, collect}",
+        metavar="{mining, collect, reset}",
     )
 
     p = sub.add_parser(
@@ -533,6 +551,9 @@ def build_arg_parser():
     p = sub.add_parser("collect", help="collect confirmed bugs")
     p.add_argument("target", type=Path, help="target file; one target per line")
     p.set_defaults(func=cmd_collect)
+
+    p = sub.add_parser("reset", help="clear audit output and manager state")
+    p.set_defaults(func=cmd_reset)
 
     return parser
 

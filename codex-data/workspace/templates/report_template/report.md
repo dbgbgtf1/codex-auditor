@@ -2,7 +2,7 @@
 
 ## 结论
 
-置信度和安全相关性(low/medium/high)。
+置信度(0-1)和安全相关性(low/medium/high)。
 
 ## 环境
 
