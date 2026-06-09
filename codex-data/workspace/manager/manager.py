@@ -257,7 +257,7 @@ def finish_task(conn, task, exit_code):
     )
     conn.commit()
     task_status = "done" if exit_code == 0 else "failed"
-    log.info(f"agent 结束 {task['scope']} status={task_status}")
+    log.info(f"agent finish {task['scope']}, status={task_status}, exit_code={exit_code}")
 
 
 def process_alive(pid):
