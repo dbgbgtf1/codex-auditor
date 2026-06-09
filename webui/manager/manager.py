@@ -144,6 +144,9 @@ def clear_directory_contents(path):
         else:
             child.unlink()
 
+    match = re.match(r"^(?P<target>.*?)\s*[\(（](?P<note>.*)[\)）]\s*$", item)
+    if not match:
+        return {"target": item, "note": None}
 
 def read_target_file(path):
     return [entry["target"] for entry in read_target_entries(path)]
@@ -473,6 +476,11 @@ def pipeline_tick(cfg, conn, targets, notes=None):
         new_counts = new_totals.get(target, zero_counts())
         log.info(f"{target}: {counts}, {target}_new: {new_counts}")
 
+    totals, new_totals = scan_archives(cfg, targets)
+    for target in targets:
+        counts = totals.get(target, zero_counts())
+        new_counts = new_totals.get(target, zero_counts())
+        log.info(f"{target}: {counts}, {target}_new: {new_counts}")
 
 def start_target_file_loop(cfg, conn, target_file):
     target_file = resolve_rooted_path(target_file)
