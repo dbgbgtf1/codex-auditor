@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Codex Auditor WebUI</title>
+    <link rel="icon" type="image/svg+xml" href="static/favicon.svg">
+    <link rel="stylesheet" href="static/app.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div>
+            <h1>Codex Auditor</h1>
+            <p>自动化审计会话</p>
+          </div>
+          <button id="themeToggle" class="icon-button" type="button" title="切换主题">◐</button>
+        </div>
+
+        <button id="newSessionButton" class="primary-button" type="button">+ 新建会话</button>
+
+        <form id="sessionForm" class="session-form hidden">
+          <label>
+            名称
+            <input id="sessionName" name="name" autocomplete="off" placeholder="可选">
+          </label>
+          <label>
+            标识符
+            <input id="sessionIdentifier" name="identifier" autocomplete="off" placeholder="LIBSSH" required>
+          </label>
+          <div class="form-actions">
+            <button class="secondary-button" type="button" id="cancelSessionButton">取消</button>
+            <button class="primary-button" type="submit">保存</button>
+          </div>
+        </form>
+
+        <div id="sessionList" class="session-list"></div>
+      </aside>
+
+      <main class="main-pane">
+        <section class="vulnerability-pane">
+          <div class="pane-header">
+            <div>
+              <h2>漏洞列表</h2>
+              <p id="vulnerabilityMeta">未选择会话</p>
+            </div>
+            <button id="refreshVulnerabilities" class="refresh-button" type="button" aria-label="刷新漏洞列表" title="刷新">
+              <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 11a8 8 0 0 0-13.5-5.8L4 7.7"></path>
+                <path d="M4 4v3.7h3.7"></path>
+                <path d="M4 13a8 8 0 0 0 13.5 5.8L20 16.3"></path>
+                <path d="M20 20v-3.7h-3.7"></path>
+              </svg>
+            </button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>编号</th>
+                  <th>危害</th>
+                  <th>类型</th>
+                  <th>模块</th>
+                  <th>难度</th>
+                  <th>EXP</th>
+                  <th>概要</th>
+                </tr>
+              </thead>
+              <tbody id="vulnerabilityRows">
+                <tr><td colspan="7" class="empty-cell">暂无数据</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="chat-pane">
+          <div class="pane-header chat-header">
+            <h2>对话预览</h2>
+          </div>
+          <div id="messages" class="messages"></div>
+          <form id="messageForm" class="message-form">
+            <button id="stopButton" class="stop-button" type="button" aria-label="停止当前运行" disabled></button>
+            <input id="messageInput" autocomplete="off" placeholder="输入消息" disabled>
+            <button id="sendButton" class="send-button" type="submit" aria-label="发送消息" title="发送" disabled>
+              <svg class="button-icon send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 20V5"></path>
+                <path d="M6.8 10.2 12 5l5.2 5.2"></path>
+              </svg>
+            </button>
+          </form>
+        </section>
+      </main>
+    </div>
+    <div id="toast" class="toast hidden"></div>
+    <script src="static/app.js"></script>
+  </body>
+</html>
