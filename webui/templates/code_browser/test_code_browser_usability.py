@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import subprocess
@@ -72,6 +73,60 @@ def run_query(root: Path, db: Path, *args: str) -> str:
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     return proc.stdout
+
+
+def test_target_test_files_are_skipped(tmp_path):
+    root = tmp_path / "project"
+    src = root / "src"
+    tests = root / "tests"
+    fuzz = root / "fuzz"
+    src.mkdir(parents=True)
+    tests.mkdir()
+    fuzz.mkdir()
+    (src / "main.c").write_text("int helper(void) { return 1; }\nint main(void) { return helper(); }\n", encoding="utf-8")
+    (src / "helper_test.c").write_text("int helper_test(void) { return 0; }\n", encoding="utf-8")
+    (tests / "test_main.c").write_text("int test_main(void) { return 0; }\n", encoding="utf-8")
+    (fuzz / "fuzz_main.c").write_text("int fuzz_main(void) { return 0; }\n", encoding="utf-8")
+    commands = [
+        {"directory": str(root), "file": str(src / "main.c"), "arguments": ["cc", "-c", str(src / "main.c")]},
+        {"directory": str(root), "file": str(tests / "test_main.c"), "arguments": ["cc", "-c", str(tests / "test_main.c")]},
+        {"directory": str(root), "file": str(fuzz / "fuzz_main.c"), "arguments": ["cc", "-c", str(fuzz / "fuzz_main.c")]},
+    ]
+    (root / "compile_commands.json").write_text(json.dumps(commands), encoding="utf-8")
+    db = tmp_path / "code_browser.sqlite"
+
+    proc = subprocess.run(
+        ["python3", str(BUILD_INDEX), "--workspace", str(root), "--db", str(db)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    handle = sqlite3.connect(db)
+    try:
+        tables = {row[0] for row in handle.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert "tests" not in tables
+        meta = {row[0]: row[1] for row in handle.execute("SELECT key, value FROM meta")}
+        assert meta["compile_command_count"] == "1"
+        files = {row[0] for row in handle.execute("SELECT path FROM files")}
+        assert "src/main.c" in files
+        assert "src/helper_test.c" not in files
+        assert "tests/test_main.c" not in files
+        assert "fuzz/fuzz_main.c" not in files
+    finally:
+        handle.close()
+
+    proc = subprocess.run(
+        ["python3", str(QUERY), "--workspace", str(root), "--db", str(db), "tests"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    assert proc.returncode != 0
+    assert "invalid choice" in proc.stderr
 
 
 def sample_definitions(conn, limit: int = 12):

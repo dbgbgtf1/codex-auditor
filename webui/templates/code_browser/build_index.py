@@ -12,7 +12,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCHEMA = SCRIPT_DIR / "schema.sql"
-DEFAULT_DB = Path(".audit") / "code_browser.sqlite"
+DEFAULT_DB = Path("code_browser") / "code_browser.sqlite"
 
 SOURCE_EXTS = {
     ".c": "c",
@@ -61,8 +61,7 @@ DEFAULT_EXCLUDE_PARTS = {
     "third_party",
 }
 
-FLAG_RE = re.compile(r"--[A-Za-z0-9][A-Za-z0-9_-]*(?:=[A-Za-z0-9_./:@+-]+)?")
-TEST_PATH_RE = re.compile(r"(^|/)(test|tests|spec|fuzz|fuzzer|unittest|integration)(/|$)", re.I)
+TEST_PATH_PARTS = {"test", "tests", "spec", "fuzz", "fuzzer", "unittest", "integration"}
 SECURITY_TERMS = ("security", "cve", "overflow", "oob", "uaf", "race", "crash", "fuzz", "sanitize", "bounds", "fix")
 
 
@@ -119,17 +118,51 @@ def git_metadata(workspace: Path) -> dict[str, str]:
 
 
 def ensure_schema(conn: sqlite3.Connection):
-    conn.executescript(SCHEMA.read_text(encoding="utf-8"))
+    schema = SCHEMA.read_text(encoding="utf-8")
+    conn.executescript(schema)
+    conn.execute("DROP TABLE IF EXISTS tests")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(commits)")}
+    if {"source_files", "test_files"} & columns:
+        conn.execute("DROP TABLE IF EXISTS commits")
+        conn.executescript(schema)
 
 
 def reset_db(conn: sqlite3.Connection):
     ensure_schema(conn)
-    for table in ("files", "symbols", "refs", "diagnostics", "tests", "commits", "routes", "meta"):
+    for table in ("files", "symbols", "refs", "diagnostics", "commits", "routes", "meta"):
         conn.execute(f"DELETE FROM {table}")
 
 
 def should_skip(path: Path, exclude_parts: set[str]) -> bool:
     return any(part in exclude_parts for part in path.parts)
+
+
+def is_test_path(workspace: Path, path: Path) -> bool:
+    try:
+        parts = path.resolve().relative_to(workspace).parts
+    except ValueError:
+        parts = path.parts
+    lower_parts = [part.lower() for part in parts]
+    if any(part in TEST_PATH_PARTS for part in lower_parts[:-1]):
+        return True
+    name = lower_parts[-1] if lower_parts else path.name.lower()
+    return (
+        name.startswith("test_")
+        or name in {"test.js", "spec.js"}
+        or name.endswith(
+            (
+                "_test.c",
+                "_test.cc",
+                "_test.cpp",
+                "_test.cxx",
+                "_test.h",
+                "_test.hpp",
+                "_test.go",
+                "_test.rs",
+                "_test.py",
+            )
+        )
+    )
 
 
 def iter_files(workspace: Path, paths: list[Path], exclude_parts: set[str], limit: int | None):
@@ -144,6 +177,8 @@ def iter_files(workspace: Path, paths: list[Path], exclude_parts: set[str], limi
             if not in_workspace(workspace, path):
                 continue
             if should_skip(path, exclude_parts):
+                continue
+            if is_test_path(workspace, path):
                 continue
             yield path
             count += 1
@@ -291,6 +326,8 @@ def load_compile_commands(path: Path | None, workspace: Path) -> tuple[list[Comp
         source = source.resolve()
         if source.suffix not in C_FAMILY_EXTS or not source.exists():
             continue
+        if in_workspace(workspace, source) and is_test_path(workspace, source):
+            continue
         if source in seen:
             continue
         seen.add(source)
@@ -302,25 +339,6 @@ def load_compile_commands(path: Path | None, workspace: Path) -> tuple[list[Comp
             raw_args = ["clang", str(source)]
         commands.append(CompileCommand(source, directory.resolve(), clean_compile_args(raw_args, directory.resolve(), source, resource_dir)))
     return commands, str(path)
-
-
-def parse_test(workspace: Path, path: Path, text: str):
-    rpath = rel(workspace, path)
-    name = path.name.lower()
-    is_test = bool(TEST_PATH_RE.search(rpath)) or name.endswith(("_test.go", "_test.rs", "_test.py", "test.js", "spec.js"))
-    if not is_test:
-        return None
-    tags = []
-    lower = text.lower()
-    for token in ("assert", "expect", "panic", "crash", "fuzz", "sanitize", "asan", "ubsan", "regress", "CVE", "timeout"):
-        if token.lower() in lower:
-            tags.append(token)
-    flags = sorted(set(FLAG_RE.findall(text)))
-    source_hint = None
-    match = re.search(r"(src|lib|include)/[A-Za-z0-9_./+-]+", text)
-    if match:
-        source_hint = match.group(0)
-    return rpath, json.dumps(sorted(set(tags))), json.dumps(flags), source_hint
 
 
 def load_routes(route_file: Path | None):
@@ -341,13 +359,6 @@ def load_routes(route_file: Path | None):
     return routes
 
 
-def classify_file(path: str, test_roots: set[str]) -> tuple[bool, bool]:
-    lower = path.lower()
-    is_test = bool(TEST_PATH_RE.search(lower)) or any(lower.startswith(root.rstrip("/") + "/") for root in test_roots)
-    is_source = not is_test
-    return is_source, is_test
-
-
 def commit_hints(subject: str, files: list[str]) -> tuple[list[str], str]:
     haystack = (subject + " " + " ".join(files)).lower()
     hints = [term for term in SECURITY_TERMS if term in haystack]
@@ -355,7 +366,7 @@ def commit_hints(subject: str, files: list[str]) -> tuple[list[str], str]:
     return hints, signal
 
 
-def index_commits(conn: sqlite3.Connection, workspace: Path, max_commits: int, test_roots: set[str]):
+def index_commits(conn: sqlite3.Connection, workspace: Path, max_commits: int):
     if max_commits <= 0 or not (workspace / ".git").exists():
         return
     raw = git_output(
@@ -378,27 +389,17 @@ def index_commits(conn: sqlite3.Connection, workspace: Path, max_commits: int, t
         commits.append(current)
 
     for item in commits:
-        source_files = []
-        test_files = []
-        for file_name in item["files"]:
-            is_source, is_test = classify_file(file_name, test_roots)
-            if is_source:
-                source_files.append(file_name)
-            if is_test:
-                test_files.append(file_name)
         hints, signal = commit_hints(item["subject"], item["files"])
         conn.execute(
             """
-            INSERT OR REPLACE INTO commits(hash, subject, date, files, source_files, test_files, diff_hints, audit_signal)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO commits(hash, subject, date, files, diff_hints, audit_signal)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 item["hash"],
                 item["subject"],
                 item["date"],
                 json.dumps(item["files"]),
-                json.dumps(source_files),
-                json.dumps(test_files),
                 json.dumps(hints),
                 signal,
             ),
@@ -601,8 +602,7 @@ def main():
     parser.add_argument("--workspace", default=".", help="目标工作区根目录。")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite 索引路径。")
     parser.add_argument("--compile-commands", type=Path, help="compile_commands.json 路径；默认在 workspace 内查找。")
-    parser.add_argument("--path", action="append", default=[], help="要收集文件/测试辅助信息的路径，可重复。默认整个 workspace。")
-    parser.add_argument("--test-root", action="append", default=["test", "tests", "spec", "fuzz"], help="相对测试根目录提示，可重复。")
+    parser.add_argument("--path", action="append", default=[], help="要收集文件辅助信息的路径，可重复。默认整个 workspace。")
     parser.add_argument("--exclude-part", action="append", default=[], help="要跳过的路径组件，可重复。")
     parser.add_argument("--route-file", type=Path, help="包含 pattern/skill/reason 条目的 JSON 路由文件。")
     parser.add_argument("--max-commits", type=int, default=500)
@@ -616,7 +616,6 @@ def main():
     paths = [Path(p).expanduser() for p in args.path] if args.path else [workspace]
     paths = [p if p.is_absolute() else workspace / p for p in paths]
     exclude_parts = set(DEFAULT_EXCLUDE_PARTS) | set(args.exclude_part)
-    test_roots = {root.strip("/") for root in args.test_root}
 
     compile_commands_path = find_compile_commands(workspace, args.compile_commands)
     compile_commands, compile_commands_meta = load_compile_commands(compile_commands_path, workspace)
@@ -627,10 +626,9 @@ def main():
     for pattern, skill, reason in load_routes(args.route_file):
         conn.execute("INSERT OR REPLACE INTO routes(pattern, skill, reason) VALUES (?, ?, ?)", (pattern, skill, reason))
 
-    file_count = test_count = 0
+    file_count = 0
     for path in iter_files(workspace, paths, exclude_parts, args.limit):
         data = path.read_bytes()
-        text = data.decode("utf-8", "replace")
         rpath = rel(workspace, path)
         lang = SOURCE_EXTS.get(path.suffix, "text")
         stat = path.stat()
@@ -639,13 +637,9 @@ def main():
             (rpath, lang, sha1_bytes(data), stat.st_size, stat.st_mtime, 1 if rpath in compile_db_sources else 0),
         )
         file_count += 1
-        parsed_test = parse_test(workspace, path, text)
-        if parsed_test:
-            conn.execute("INSERT OR REPLACE INTO tests(path, tags, flags, source_hint) VALUES (?, ?, ?, ?)", parsed_test)
-            test_count += 1
 
     symbol_count, ref_count, diag_count = index_translation_units(conn, workspace, compile_commands)
-    index_commits(conn, workspace, args.max_commits, test_roots)
+    index_commits(conn, workspace, args.max_commits)
 
     meta = {
         **git_metadata(workspace),
@@ -653,13 +647,11 @@ def main():
         "compile_commands": compile_commands_meta,
         "compile_command_count": str(len(compile_commands)),
         "indexed_paths": json.dumps([rel(workspace, p) if in_workspace(workspace, p) else str(p) for p in paths]),
-        "test_roots": json.dumps(sorted(test_roots)),
         "route_file": str(args.route_file or ""),
         "file_count": str(file_count),
         "symbol_count": str(symbol_count),
         "ref_count": str(ref_count),
         "diagnostic_count": str(diag_count),
-        "test_count": str(test_count),
     }
     for key, value in meta.items():
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, str(value)))
@@ -667,7 +659,7 @@ def main():
     print(
         "已索引 "
         f"backend=libclang files={file_count} symbols={symbol_count} refs={ref_count} "
-        f"diagnostics={diag_count} tests={test_count} db={db}"
+        f"diagnostics={diag_count} db={db}"
     )
 
 

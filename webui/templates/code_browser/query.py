@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 
-DEFAULT_DB = Path(".audit") / "code_browser.sqlite"
+DEFAULT_DB = Path("code_browser") / "code_browser.sqlite"
 LOCATION_RE = re.compile(r"^(?P<path>.+):(?P<start>\d+)(?:-(?P<end>\d+))?$")
 
 
@@ -231,7 +231,6 @@ def cmd_meta(args):
         "symbol_count",
         "ref_count",
         "diagnostic_count",
-        "test_count",
         "git_head",
         "git_dirty",
         "git_status_count",
@@ -357,25 +356,6 @@ def cmd_diagnostics(args):
         print(f"{row['path'] or '<unknown>'}:{row['line'] or 0}:{row['column'] or 0}: severity={row['severity']} {row['message']}")
 
 
-def cmd_tests(args):
-    workspace = workspace_path(args.workspace)
-    conn = connect(resolve_db(workspace, args.db))
-    term = args.term or ""
-    like = f"%{term}%"
-    rows = conn.execute(
-        """
-        SELECT path, tags, flags, COALESCE(source_hint, '') AS source_hint
-        FROM tests
-        WHERE path LIKE ? OR tags LIKE ? OR flags LIKE ? OR source_hint LIKE ?
-        ORDER BY path
-        LIMIT ?
-        """,
-        (like, like, like, like, args.limit),
-    ).fetchall()
-    for row in rows:
-        print(f"{row['path']} | tags={','.join(json_list(row['tags'])) or '-'} | flags={','.join(json_list(row['flags'])) or '-'} | hint={row['source_hint'] or '-'}")
-
-
 def cmd_commits(args):
     workspace = workspace_path(args.workspace)
     conn = connect(resolve_db(workspace, args.db))
@@ -383,19 +363,18 @@ def cmd_commits(args):
     like = f"%{term}%"
     rows = conn.execute(
         """
-        SELECT hash, date, subject, source_files, test_files, diff_hints, audit_signal
+        SELECT hash, date, subject, files, diff_hints, audit_signal
         FROM commits
-        WHERE subject LIKE ? OR files LIKE ? OR source_files LIKE ? OR test_files LIKE ? OR diff_hints LIKE ? OR audit_signal LIKE ?
+        WHERE subject LIKE ? OR files LIKE ? OR diff_hints LIKE ? OR audit_signal LIKE ?
         ORDER BY date DESC
         LIMIT ?
         """,
-        (like, like, like, like, like, like, args.limit),
+        (like, like, like, like, args.limit),
     ).fetchall()
     for row in rows:
         print(
             f"{row['hash'][:12]} | {row['date']} | {row['subject']} | "
-            f"src={','.join(json_list(row['source_files'])[:3]) or '-'} | "
-            f"test={','.join(json_list(row['test_files'])[:3]) or '-'} | "
+            f"files={','.join(json_list(row['files'])[:3]) or '-'} | "
             f"hints={','.join(json_list(row['diff_hints'])) or row['audit_signal'] or '-'}"
         )
 
@@ -473,8 +452,6 @@ def cmd_context(args):
             ).fetchall()
             for ref in rows:
                 print(f"{ref['path']}:{ref['line']}:{ref['column']}: {ref['name']} [{ref['kind']}] {ref['context']}")
-    print("== 测试 ==")
-    cmd_tests(argparse.Namespace(workspace=args.workspace, db=args.db, term=Path(path).stem, limit=5))
     print("== commits ==")
     cmd_commits(argparse.Namespace(workspace=args.workspace, db=args.db, term=path, limit=5))
 
@@ -515,11 +492,6 @@ def build_parser():
     p.add_argument("path", nargs="?", default="")
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(func=cmd_diagnostics)
-
-    p = sub.add_parser("tests")
-    p.add_argument("term", nargs="?", default="")
-    p.add_argument("--limit", type=int, default=20)
-    p.set_defaults(func=cmd_tests)
 
     p = sub.add_parser("commits")
     p.add_argument("term", nargs="?", default="")

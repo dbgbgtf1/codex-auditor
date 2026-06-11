@@ -67,20 +67,11 @@ CREATE TABLE IF NOT EXISTS diagnostics (
 CREATE INDEX IF NOT EXISTS idx_diagnostics_path ON diagnostics(path);
 CREATE INDEX IF NOT EXISTS idx_diagnostics_severity ON diagnostics(severity);
 
-CREATE TABLE IF NOT EXISTS tests (
-  path TEXT PRIMARY KEY,
-  tags TEXT NOT NULL,
-  flags TEXT NOT NULL,
-  source_hint TEXT
-);
-
 CREATE TABLE IF NOT EXISTS commits (
   hash TEXT PRIMARY KEY,
   subject TEXT NOT NULL,
   date TEXT,
   files TEXT NOT NULL,
-  source_files TEXT NOT NULL DEFAULT '[]',
-  test_files TEXT NOT NULL DEFAULT '[]',
   diff_hints TEXT NOT NULL DEFAULT '[]',
   audit_signal TEXT NOT NULL DEFAULT ''
 );

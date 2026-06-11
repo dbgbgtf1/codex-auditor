@@ -1,7 +1,7 @@
 # C/C++ 语义代码浏览器
 
 这是一个本地 SQLite 索引和 CLI，用于收集 C/C++ 审计事实。主后端使用 `libclang` 解析
-`compile_commands.json`，索引符号、定义、引用和诊断；同时保留测试文件、近期 commit 和路由提示等辅助信息。
+`compile_commands.json`，索引符号、定义、引用和诊断；同时保留近期 commit 和路由提示等辅助信息。
 
 ## 生成 compile_commands.json
 
@@ -23,7 +23,7 @@ bear -- make
 python3 code_browser/build_index.py \
   --workspace /目标/路径 \
   --compile-commands /目标/路径/build/compile_commands.json \
-  --db /目标/路径/.audit/code_browser.sqlite
+  --db /目标/路径/code_browser/code_browser.sqlite
 ```
 
 ## 构建索引
@@ -31,12 +31,12 @@ python3 code_browser/build_index.py \
 ```sh
 python3 code_browser/build_index.py \
   --workspace /目标/路径 \
-  --db /目标/路径/.audit/code_browser.sqlite \
+  --db /目标/路径/code_browser/code_browser.sqlite \
   --route-file /目标/路径/code_browser/routes.json \
   --max-commits 500
 ```
 
-`--path` 只限制文件/测试辅助信息的收集范围；C/C++ 语义索引由 compile database 中的翻译单元决定。
+`--path` 只限制文件辅助信息的收集范围；C/C++ 语义索引由 compile database 中的翻译单元决定。
 
 `routes.json` 是可选路由文件：
 
@@ -61,7 +61,6 @@ python3 code_browser/query.py --workspace /目标/路径 context src/foo.c:120-1
 python3 code_browser/query.py --workspace /目标/路径 context parse_header
 python3 code_browser/query.py --workspace /目标/路径 diagnostics
 python3 code_browser/query.py --workspace /目标/路径 route src/parser/read.c
-python3 code_browser/query.py --workspace /目标/路径 tests parse_header --limit 20
 python3 code_browser/query.py --workspace /目标/路径 commits parser --limit 20
 ```
 
