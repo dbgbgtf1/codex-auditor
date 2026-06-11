@@ -3,8 +3,10 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
 import sqlite3
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -43,6 +45,7 @@ SOURCE_EXTS = {
     ".idl": "idl",
 }
 
+C_FAMILY_EXTS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
 DEFAULT_EXCLUDE_PARTS = {
     ".git",
     ".hg",
@@ -58,22 +61,16 @@ DEFAULT_EXCLUDE_PARTS = {
     "third_party",
 }
 
-CPP_CLASS_RE = re.compile(r"^\s*(?:template\s*<[^>]+>\s*)?(class|struct|enum)\s+([A-Za-z_][\w:]*)\b")
-CPP_FUNC_RE = re.compile(
-    r"^\s*(?:(?:template\s*<[^>]+>\s*)?(?:[A-Za-z_][\w:<>,~*&\s]+\s+)+)?"
-    r"([A-Za-z_~][\w:~]*::[A-Za-z_~][\w~]*|[A-Za-z_][\w]*)\s*"
-    r"\(([^;{}]*)\)\s*(?:const\s*)?(?:noexcept\s*)?(?:override\s*)?(?:final\s*)?(?:\{|$)"
-)
-RUST_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(fn|struct|enum|trait|impl)\s+([A-Za-z_][\w]*)\b")
-GO_FUNC_RE = re.compile(r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][\w]*)\s*\(")
-GO_TYPE_RE = re.compile(r"^\s*type\s+([A-Za-z_][\w]*)\s+(struct|interface|[A-Za-z_][\w]*)\b")
-PY_RE = re.compile(r"^\s*(?:async\s+)?(def|class)\s+([A-Za-z_][\w]*)\s*[\(:]")
-JS_RE = re.compile(r"^\s*(?:export\s+)?(?:async\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)\b")
-JAVA_RE = re.compile(r"^\s*(?:public|private|protected|static|final|abstract|\s)+\s*(?:class|interface|enum|void|[A-Za-z_][\w<>\[\], ?]+)\s+([A-Za-z_][\w]*)\s*[\({]")
-IDENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b")
 FLAG_RE = re.compile(r"--[A-Za-z0-9][A-Za-z0-9_-]*(?:=[A-Za-z0-9_./:@+-]+)?")
 TEST_PATH_RE = re.compile(r"(^|/)(test|tests|spec|fuzz|fuzzer|unittest|integration)(/|$)", re.I)
 SECURITY_TERMS = ("security", "cve", "overflow", "oob", "uaf", "race", "crash", "fuzz", "sanitize", "bounds", "fix")
+
+
+@dataclass(frozen=True)
+class CompileCommand:
+    source: Path
+    directory: Path
+    args: list[str]
 
 
 def resolve_workspace(value: str) -> Path:
@@ -82,6 +79,14 @@ def resolve_workspace(value: str) -> Path:
 
 def rel(workspace: Path, path: Path) -> str:
     return path.resolve().relative_to(workspace).as_posix()
+
+
+def in_workspace(workspace: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(workspace)
+        return True
+    except ValueError:
+        return False
 
 
 def sha1_bytes(data: bytes) -> str:
@@ -119,7 +124,7 @@ def ensure_schema(conn: sqlite3.Connection):
 
 def reset_db(conn: sqlite3.Connection):
     ensure_schema(conn)
-    for table in ("files", "symbols", "refs", "tests", "commits", "routes", "meta"):
+    for table in ("files", "symbols", "refs", "diagnostics", "tests", "commits", "routes", "meta"):
         conn.execute(f"DELETE FROM {table}")
 
 
@@ -136,9 +141,7 @@ def iter_files(workspace: Path, paths: list[Path], exclude_parts: set[str], limi
         for path in candidates:
             if path.suffix not in SOURCE_EXTS:
                 continue
-            try:
-                path.relative_to(workspace)
-            except ValueError:
+            if not in_workspace(workspace, path):
                 continue
             if should_skip(path, exclude_parts):
                 continue
@@ -148,68 +151,157 @@ def iter_files(workspace: Path, paths: list[Path], exclude_parts: set[str], limi
                 return
 
 
-def parse_symbols(path: Path, text: str):
-    lang = SOURCE_EXTS.get(path.suffix, "text")
-    symbols = []
-    container = None
-    for line_no, line in enumerate(text.splitlines(), 1):
-        stripped = line.strip()
-        if not stripped or stripped.startswith(("//", "#", "*")):
+def find_compile_commands(workspace: Path, explicit: Path | None) -> Path | None:
+    if explicit:
+        path = explicit.expanduser()
+        return path if path.is_absolute() else workspace / path
+    direct = workspace / "compile_commands.json"
+    if direct.exists():
+        return direct
+    for name in ("build", "cmake-build-debug", "cmake-build-release", "out"):
+        candidate = workspace / name / "compile_commands.json"
+        if candidate.exists():
+            return candidate
+    for candidate in workspace.rglob("compile_commands.json"):
+        if should_skip(candidate, DEFAULT_EXCLUDE_PARTS - {"build", "out"}):
             continue
-        if lang in {"c", "cpp", "c-header"}:
-            m = CPP_CLASS_RE.match(line)
-            if m:
-                container = m.group(2)
-                symbols.append((container, m.group(1), line_no, None, stripped[:300]))
-                continue
-            m = CPP_FUNC_RE.match(line)
-            if m and m.group(1) not in {"if", "for", "while", "switch", "return", "sizeof"}:
-                symbols.append((m.group(1), "function", line_no, container, stripped[:300]))
-        elif lang == "rust":
-            m = RUST_RE.match(line)
-            if m:
-                symbols.append((m.group(2), m.group(1), line_no, container, stripped[:300]))
-        elif lang == "go":
-            m = GO_FUNC_RE.match(line)
-            if m:
-                symbols.append((m.group(1), "function", line_no, container, stripped[:300]))
-                continue
-            m = GO_TYPE_RE.match(line)
-            if m:
-                symbols.append((m.group(1), m.group(2), line_no, container, stripped[:300]))
-        elif lang == "python":
-            m = PY_RE.match(line)
-            if m:
-                symbols.append((m.group(2), m.group(1), line_no, container, stripped[:300]))
-        elif lang in {"js", "ts"}:
-            m = JS_RE.match(line)
-            if m:
-                symbols.append((m.group(1), "symbol", line_no, container, stripped[:300]))
-        elif lang == "java":
-            m = JAVA_RE.match(line)
-            if m:
-                symbols.append((m.group(1), "java-symbol", line_no, container, stripped[:300]))
-    return symbols
+        return candidate
+    return None
 
 
-def parse_refs(text: str, max_per_file: int):
-    refs = []
-    seen = set()
-    skip = {"const", "return", "static", "inline", "class", "struct", "public", "private", "protected", "function", "import"}
-    for line_no, line in enumerate(text.splitlines(), 1):
-        if len(refs) >= max_per_file:
-            break
-        if len(line) > 800:
+def clang_resource_dir() -> str:
+    for binary in ("clang", "clang-20", "clang-19", "clang-18", "clang-17"):
+        try:
+            value = subprocess.check_output([binary, "-print-resource-dir"], text=True, stderr=subprocess.DEVNULL).strip()
+        except (OSError, subprocess.CalledProcessError):
             continue
-        for name in IDENT_RE.findall(line):
-            if name in skip:
-                continue
-            key = (name, line_no)
-            if key in seen:
-                continue
-            seen.add(key)
-            refs.append((name, line_no, line.strip()[:300]))
-    return refs
+        if value:
+            return value
+    return ""
+
+
+def source_arg_matches(arg: str, directory: Path, source: Path) -> bool:
+    path = Path(arg)
+    candidate = path if path.is_absolute() else directory / path
+    try:
+        return candidate.resolve() == source.resolve()
+    except OSError:
+        return False
+
+
+def absolutize_arg_path(value: str, directory: Path) -> str:
+    if not value or value.startswith("$"):
+        return value
+    path = Path(value)
+    return str(path if path.is_absolute() else (directory / path).resolve())
+
+
+def compiler_payload(raw_args: list[str]) -> list[str]:
+    wrappers = {"ccache", "sccache", "distcc", "icecc"}
+    compilers = {"cc", "c++", "gcc", "g++", "clang", "clang++", "cl", "emcc", "em++"}
+    i = 0
+    while i < len(raw_args):
+        arg = raw_args[i]
+        base = Path(arg).name
+        if arg == "env" or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", arg):
+            i += 1
+            continue
+        if base in wrappers:
+            i += 1
+            continue
+        if base in compilers or re.match(r"^(?:[A-Za-z0-9_.+-]+-)?(?:gcc|g\+\+|clang|clang\+\+|cc|c\+\+)$", base):
+            return raw_args[i + 1 :]
+        break
+    return raw_args[1:] if raw_args else []
+
+
+def clean_compile_args(raw_args: list[str], directory: Path, source: Path, resource_dir: str) -> list[str]:
+    args = compiler_payload(raw_args)
+    cleaned: list[str] = []
+    skip_next = False
+    pending_path_opt: str | None = None
+    path_taking_opts = {
+        "-I",
+        "-isystem",
+        "-iquote",
+        "-idirafter",
+        "-include",
+        "-imacros",
+        "-isysroot",
+        "--sysroot",
+    }
+    drop_value_opts = {"-o"}
+
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if pending_path_opt:
+            cleaned.append(absolutize_arg_path(arg, directory))
+            pending_path_opt = None
+            continue
+        if arg in {"-c", "-S"} or arg == source.name or source_arg_matches(arg, directory, source):
+            continue
+        if arg in drop_value_opts:
+            skip_next = True
+            continue
+        if arg.startswith("-o") and len(arg) > 2:
+            continue
+        if arg in path_taking_opts:
+            cleaned.append(arg)
+            pending_path_opt = arg
+            continue
+        handled_joined = False
+        for opt in ("-I", "-isystem", "-iquote", "-idirafter", "-include", "-imacros"):
+            if arg.startswith(opt) and len(arg) > len(opt):
+                cleaned.append(opt + absolutize_arg_path(arg[len(opt) :], directory))
+                handled_joined = True
+                break
+        if handled_joined:
+            continue
+        if arg.startswith("--sysroot="):
+            cleaned.append("--sysroot=" + absolutize_arg_path(arg.split("=", 1)[1], directory))
+            continue
+        cleaned.append(arg)
+
+    if resource_dir and "-resource-dir" not in cleaned and not any(arg.startswith("-resource-dir=") for arg in cleaned):
+        cleaned.extend(["-resource-dir", resource_dir])
+    return cleaned
+
+
+def load_compile_commands(path: Path | None, workspace: Path) -> tuple[list[CompileCommand], str]:
+    if not path or not path.exists():
+        return [], ""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise SystemExit(f"compile_commands.json 不是 JSON 数组: {path}")
+    resource_dir = clang_resource_dir()
+    commands: list[CompileCommand] = []
+    seen: set[Path] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        directory = Path(str(item.get("directory") or workspace)).expanduser()
+        directory = directory if directory.is_absolute() else workspace / directory
+        file_value = item.get("file")
+        if not file_value:
+            continue
+        source = Path(str(file_value)).expanduser()
+        source = source if source.is_absolute() else directory / source
+        source = source.resolve()
+        if source.suffix not in C_FAMILY_EXTS or not source.exists():
+            continue
+        if source in seen:
+            continue
+        seen.add(source)
+        if isinstance(item.get("arguments"), list):
+            raw_args = [str(arg) for arg in item["arguments"]]
+        elif item.get("command"):
+            raw_args = shlex.split(str(item["command"]))
+        else:
+            raw_args = ["clang", str(source)]
+        commands.append(CompileCommand(source, directory.resolve(), clean_compile_args(raw_args, directory.resolve(), source, resource_dir)))
+    return commands, str(path)
 
 
 def parse_test(workspace: Path, path: Path, text: str):
@@ -219,8 +311,9 @@ def parse_test(workspace: Path, path: Path, text: str):
     if not is_test:
         return None
     tags = []
+    lower = text.lower()
     for token in ("assert", "expect", "panic", "crash", "fuzz", "sanitize", "asan", "ubsan", "regress", "CVE", "timeout"):
-        if token.lower() in text.lower():
+        if token.lower() in lower:
             tags.append(token)
     flags = sorted(set(FLAG_RE.findall(text)))
     source_hint = None
@@ -312,15 +405,206 @@ def index_commits(conn: sqlite3.Connection, workspace: Path, max_commits: int, t
         )
 
 
+def cursor_location(cursor):
+    loc = cursor.location
+    if not loc or not loc.file:
+        return None
+    return Path(str(loc.file.name)).resolve(), int(loc.line or 0), int(loc.column or 0)
+
+
+def cursor_extent(cursor):
+    extent = cursor.extent
+    return (
+        int(extent.start.line or 0),
+        int(extent.start.column or 0),
+        int(extent.end.line or 0),
+        int(extent.end.column or 0),
+    )
+
+
+def cursor_usr(cursor) -> str:
+    try:
+        return cursor.get_usr() or ""
+    except Exception:
+        return ""
+
+
+def cursor_signature(cursor) -> str:
+    try:
+        args = [arg.spelling or "" for arg in cursor.get_arguments() or []]
+    except Exception:
+        args = []
+    if args:
+        return f"{cursor.spelling}({', '.join(args)})"
+    return cursor.displayname or cursor.spelling or ""
+
+
+def line_context(path: Path, line: int, cache: dict[Path, list[str]]) -> str:
+    if path not in cache:
+        try:
+            cache[path] = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            cache[path] = []
+    lines = cache[path]
+    if 1 <= line <= len(lines):
+        return lines[line - 1].strip()[:300]
+    return ""
+
+
+def severity_name(value: int) -> str:
+    return {0: "ignored", 1: "note", 2: "warning", 3: "error", 4: "fatal"}.get(value, str(value))
+
+
+def index_translation_units(conn: sqlite3.Connection, workspace: Path, commands: list[CompileCommand]) -> tuple[int, int, int]:
+    if not commands:
+        return 0, 0, 0
+    try:
+        from clang import cindex
+    except Exception as exc:
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("libclang_error", str(exc)))
+        return 0, 0, 0
+
+    declaration_kinds = {
+        cindex.CursorKind.FUNCTION_DECL,
+        cindex.CursorKind.CXX_METHOD,
+        cindex.CursorKind.CONSTRUCTOR,
+        cindex.CursorKind.DESTRUCTOR,
+        cindex.CursorKind.FUNCTION_TEMPLATE,
+        cindex.CursorKind.CLASS_DECL,
+        cindex.CursorKind.CLASS_TEMPLATE,
+        cindex.CursorKind.STRUCT_DECL,
+        cindex.CursorKind.UNION_DECL,
+        cindex.CursorKind.ENUM_DECL,
+        cindex.CursorKind.TYPEDEF_DECL,
+        cindex.CursorKind.TYPE_ALIAS_DECL,
+        cindex.CursorKind.VAR_DECL,
+        cindex.CursorKind.FIELD_DECL,
+        cindex.CursorKind.ENUM_CONSTANT_DECL,
+        cindex.CursorKind.NAMESPACE,
+    }
+    reference_kinds = {
+        cindex.CursorKind.DECL_REF_EXPR,
+        cindex.CursorKind.MEMBER_REF_EXPR,
+        cindex.CursorKind.CALL_EXPR,
+        cindex.CursorKind.TYPE_REF,
+        cindex.CursorKind.TEMPLATE_REF,
+        cindex.CursorKind.NAMESPACE_REF,
+        cindex.CursorKind.MEMBER_REF,
+    }
+
+    index = cindex.Index.create()
+    symbol_count = 0
+    ref_count = 0
+    diag_count = 0
+    source_cache: dict[Path, list[str]] = {}
+
+    for command in commands:
+        try:
+            tu = index.parse(str(command.source), args=command.args, options=cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
+        except Exception as exc:
+            rpath = rel(workspace, command.source) if in_workspace(workspace, command.source) else str(command.source)
+            conn.execute(
+                "INSERT INTO diagnostics(path, line, column, severity, message) VALUES (?, ?, ?, ?, ?)",
+                (rpath, 0, 0, 4, f"libclang parse failed: {exc}"),
+            )
+            diag_count += 1
+            continue
+
+        for diagnostic in tu.diagnostics:
+            loc = diagnostic.location
+            path = None
+            if loc and loc.file:
+                dpath = Path(str(loc.file.name)).resolve()
+                path = rel(workspace, dpath) if in_workspace(workspace, dpath) else str(dpath)
+            conn.execute(
+                "INSERT INTO diagnostics(path, line, column, severity, message) VALUES (?, ?, ?, ?, ?)",
+                (path, int(loc.line or 0), int(loc.column or 0), int(diagnostic.severity), f"{severity_name(int(diagnostic.severity))}: {diagnostic.spelling}"),
+            )
+            diag_count += 1
+
+        stack = [tu.cursor]
+        while stack:
+            cursor = stack.pop()
+            stack.extend(reversed(list(cursor.get_children())))
+            location = cursor_location(cursor)
+            if not location:
+                continue
+            path, line, column = location
+            if not in_workspace(workspace, path):
+                continue
+            rpath = rel(workspace, path)
+            spelling = cursor.spelling or cursor.displayname or ""
+
+            if cursor.kind in declaration_kinds and spelling:
+                start_line, start_col, end_line, end_col = cursor_extent(cursor)
+                try:
+                    type_text = cursor.type.spelling or ""
+                except Exception:
+                    type_text = ""
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO symbols(
+                      usr, name, kind, path, line, column,
+                      extent_start_line, extent_start_column, extent_end_line, extent_end_column,
+                      is_definition, type, signature, backend
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'libclang')
+                    """,
+                    (
+                        cursor_usr(cursor),
+                        spelling,
+                        str(cursor.kind).split(".")[-1],
+                        rpath,
+                        line,
+                        column,
+                        start_line,
+                        start_col,
+                        end_line,
+                        end_col,
+                        1 if cursor.is_definition() else 0,
+                        type_text,
+                        cursor_signature(cursor),
+                    ),
+                )
+                symbol_count += 1 if conn.execute("SELECT changes()").fetchone()[0] else 0
+
+            if cursor.kind in reference_kinds:
+                referenced = cursor.referenced
+                if not referenced:
+                    continue
+                ref_usr = cursor_usr(referenced)
+                ref_name = referenced.spelling or cursor.spelling or cursor.displayname or ""
+                if not ref_usr or not ref_name:
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO refs(referenced_usr, name, kind, path, line, column, context)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ref_usr,
+                        ref_name,
+                        str(cursor.kind).split(".")[-1],
+                        rpath,
+                        line,
+                        column,
+                        line_context(path, line, source_cache),
+                    ),
+                )
+                ref_count += 1 if conn.execute("SELECT changes()").fetchone()[0] else 0
+
+    return symbol_count, ref_count, diag_count
+
+
 def main():
-    parser = argparse.ArgumentParser(description="构建目标无关的源码索引，供二进制软件漏洞审计使用。")
+    parser = argparse.ArgumentParser(description="构建面向 C/C++ 审计的 libclang 语义索引。")
     parser.add_argument("--workspace", default=".", help="目标工作区根目录。")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite 索引路径。")
-    parser.add_argument("--path", action="append", default=[], help="要索引的路径，可为相对工作区路径或绝对路径，可重复。")
+    parser.add_argument("--compile-commands", type=Path, help="compile_commands.json 路径；默认在 workspace 内查找。")
+    parser.add_argument("--path", action="append", default=[], help="要收集文件/测试辅助信息的路径，可重复。默认整个 workspace。")
     parser.add_argument("--test-root", action="append", default=["test", "tests", "spec", "fuzz"], help="相对测试根目录提示，可重复。")
     parser.add_argument("--exclude-part", action="append", default=[], help="要跳过的路径组件，可重复。")
     parser.add_argument("--route-file", type=Path, help="包含 pattern/skill/reason 条目的 JSON 路由文件。")
-    parser.add_argument("--refs-per-file", type=int, default=0, help="每个文件最多预缓存 N 条文本引用。")
     parser.add_argument("--max-commits", type=int, default=500)
     parser.add_argument("--limit", type=int, help="Limit indexed files for quick validation.")
     args = parser.parse_args()
@@ -329,17 +613,21 @@ def main():
     db = args.db if args.db.is_absolute() else workspace / args.db
     db.parent.mkdir(parents=True, exist_ok=True)
 
-    paths = [workspace / p for p in args.path] if args.path else [workspace]
+    paths = [Path(p).expanduser() for p in args.path] if args.path else [workspace]
     paths = [p if p.is_absolute() else workspace / p for p in paths]
     exclude_parts = set(DEFAULT_EXCLUDE_PARTS) | set(args.exclude_part)
     test_roots = {root.strip("/") for root in args.test_root}
+
+    compile_commands_path = find_compile_commands(workspace, args.compile_commands)
+    compile_commands, compile_commands_meta = load_compile_commands(compile_commands_path, workspace)
+    compile_db_sources = {rel(workspace, command.source) for command in compile_commands if in_workspace(workspace, command.source)}
 
     conn = sqlite3.connect(db)
     reset_db(conn)
     for pattern, skill, reason in load_routes(args.route_file):
         conn.execute("INSERT OR REPLACE INTO routes(pattern, skill, reason) VALUES (?, ?, ?)", (pattern, skill, reason))
 
-    file_count = symbol_count = ref_count = test_count = 0
+    file_count = test_count = 0
     for path in iter_files(workspace, paths, exclude_parts, args.limit):
         data = path.read_bytes()
         text = data.decode("utf-8", "replace")
@@ -347,42 +635,40 @@ def main():
         lang = SOURCE_EXTS.get(path.suffix, "text")
         stat = path.stat()
         conn.execute(
-            "INSERT OR REPLACE INTO files(path, lang, sha1, size, mtime) VALUES (?, ?, ?, ?, ?)",
-            (rpath, lang, sha1_bytes(data), stat.st_size, stat.st_mtime),
+            "INSERT OR REPLACE INTO files(path, lang, sha1, size, mtime, in_compile_db) VALUES (?, ?, ?, ?, ?, ?)",
+            (rpath, lang, sha1_bytes(data), stat.st_size, stat.st_mtime, 1 if rpath in compile_db_sources else 0),
         )
         file_count += 1
-        for name, kind, line, container, signature in parse_symbols(path, text):
-            conn.execute(
-                "INSERT INTO symbols(name, kind, path, line, container, signature) VALUES (?, ?, ?, ?, ?, ?)",
-                (name, kind, rpath, line, container, signature),
-            )
-            symbol_count += 1
-        for name, line, context in parse_refs(text, args.refs_per_file):
-            conn.execute(
-                "INSERT OR IGNORE INTO refs(name, path, line, context) VALUES (?, ?, ?, ?)",
-                (name, rpath, line, context),
-            )
-            ref_count += 1
         parsed_test = parse_test(workspace, path, text)
         if parsed_test:
             conn.execute("INSERT OR REPLACE INTO tests(path, tags, flags, source_hint) VALUES (?, ?, ?, ?)", parsed_test)
             test_count += 1
 
+    symbol_count, ref_count, diag_count = index_translation_units(conn, workspace, compile_commands)
     index_commits(conn, workspace, args.max_commits, test_roots)
+
     meta = {
         **git_metadata(workspace),
-        "indexed_paths": json.dumps([rel(workspace, p) if p.is_relative_to(workspace) else str(p) for p in paths]),
+        "backend": "libclang",
+        "compile_commands": compile_commands_meta,
+        "compile_command_count": str(len(compile_commands)),
+        "indexed_paths": json.dumps([rel(workspace, p) if in_workspace(workspace, p) else str(p) for p in paths]),
         "test_roots": json.dumps(sorted(test_roots)),
         "route_file": str(args.route_file or ""),
         "file_count": str(file_count),
         "symbol_count": str(symbol_count),
         "ref_count": str(ref_count),
+        "diagnostic_count": str(diag_count),
         "test_count": str(test_count),
     }
     for key, value in meta.items():
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
-    print(f"已索引 files={file_count} symbols={symbol_count} refs={ref_count} tests={test_count} db={db}")
+    print(
+        "已索引 "
+        f"backend=libclang files={file_count} symbols={symbol_count} refs={ref_count} "
+        f"diagnostics={diag_count} tests={test_count} db={db}"
+    )
 
 
 if __name__ == "__main__":

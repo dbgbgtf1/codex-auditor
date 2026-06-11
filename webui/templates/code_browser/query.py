@@ -110,15 +110,6 @@ def json_list(value) -> list[str]:
     return [str(item) for item in data] if isinstance(data, list) else []
 
 
-def indexed_paths(conn) -> list[str]:
-    meta = meta_dict(conn)
-    try:
-        paths = json.loads(meta.get("indexed_paths", "[]"))
-    except json.JSONDecodeError:
-        paths = []
-    return [str(path) for path in paths] or ["."]
-
-
 def source_window(workspace: Path, path: str, start: int, end: int):
     abs_path = workspace / path
     if not abs_path.exists():
@@ -148,7 +139,8 @@ def fetch_files(conn, workspace: Path, term: str, limit: int | None):
         return path, start, end, []
     like = f"%{path}%"
     sql = """
-        SELECT path, lang, size FROM files
+        SELECT path, lang, size, in_compile_db
+        FROM files
         WHERE path = ? OR path LIKE ?
         ORDER BY CASE WHEN path = ? THEN 0 ELSE 1 END, path
     """
@@ -159,18 +151,62 @@ def fetch_files(conn, workspace: Path, term: str, limit: int | None):
     return None, None, None, conn.execute(sql, params).fetchall()
 
 
-def fetch_symbols(conn, name: str, limit: int):
-    like = f"%{name}%"
+def fetch_symbols(conn, term: str, limit: int, definitions_only: bool = False):
+    like = f"%{term}%"
+    definition_clause = "AND is_definition = 1" if definitions_only else ""
     return conn.execute(
-        """
-        SELECT name, kind, path, line, COALESCE(container, '') AS container, COALESCE(signature, '') AS signature
+        f"""
+        SELECT
+          COALESCE(usr, '') AS usr, name, kind, path, line, column,
+          is_definition, COALESCE(type, '') AS type,
+          COALESCE(signature, '') AS signature, backend
         FROM symbols
-        WHERE name = ? OR name LIKE ?
-        ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, path, line
+        WHERE (usr = ? OR name = ? OR name LIKE ?) {definition_clause}
+        ORDER BY
+          CASE WHEN usr = ? THEN 0 WHEN name = ? THEN 1 ELSE 2 END,
+          is_definition DESC, path, line, column
         LIMIT ?
         """,
-        (name, like, name, limit),
+        (term, term, like, term, term, limit),
     ).fetchall()
+
+
+def exact_symbol_candidates(conn, term: str, limit: int):
+    return conn.execute(
+        """
+        SELECT
+          COALESCE(usr, '') AS usr, name, kind, path, line, column, is_definition,
+          COALESCE(signature, '') AS signature
+        FROM symbols
+        WHERE usr = ? OR name = ?
+        ORDER BY CASE WHEN usr = ? THEN 0 ELSE 1 END, is_definition DESC, path, line
+        LIMIT ?
+        """,
+        (term, term, term, limit),
+    ).fetchall()
+
+
+def symbol_usrs_for_name(conn, name: str, limit: int = 50) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT usr
+        FROM symbols
+        WHERE name = ? AND usr IS NOT NULL AND usr != ''
+        ORDER BY usr
+        LIMIT ?
+        """,
+        (name, limit),
+    ).fetchall()
+    return [row["usr"] for row in rows]
+
+
+def distinct_usrs(rows) -> list[str]:
+    values = []
+    for row in rows:
+        usr = row["usr"]
+        if usr and usr not in values:
+            values.append(usr)
+    return values
 
 
 def route_for(conn, path: str):
@@ -182,39 +218,26 @@ def route_for(conn, path: str):
     return {"pattern": "<none>", "skill": "target-audit-index", "reason": "没有匹配路由；请使用目标 audit-index 或创建 route"}
 
 
-def live_rg_refs(conn, workspace: Path, name: str, limit: int):
-    paths = indexed_paths(conn)
-    cmd = ["rg", "--line-number", "--fixed-strings", "--glob", "!build/**", "--glob", "!out/**", "--", name, *paths]
-    rows = []
-    try:
-        proc = subprocess.Popen(cmd, cwd=workspace, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    except OSError:
-        return rows
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        if len(rows) >= limit:
-            proc.terminate()
-            break
-        parts = line.rstrip("\n").split(":", 2)
-        if len(parts) != 3:
-            continue
-        path, line_text, context = parts
-        try:
-            line_no = int(line_text)
-        except ValueError:
-            continue
-        rows.append({"name": name, "path": path, "line": line_no, "context": context.strip()[:300]})
-    proc.wait()
-    return rows
-
-
 def cmd_meta(args):
     workspace = workspace_path(args.workspace)
     conn = connect(resolve_db(workspace, args.db))
     meta = meta_dict(conn)
     current = current_git_metadata(workspace)
-    for key in sorted(meta):
-        print(f"{key}: {meta[key]}")
+    for key in (
+        "backend",
+        "compile_commands",
+        "compile_command_count",
+        "file_count",
+        "symbol_count",
+        "ref_count",
+        "diagnostic_count",
+        "test_count",
+        "git_head",
+        "git_dirty",
+        "git_status_count",
+    ):
+        if key in meta:
+            print(f"{key}: {meta[key]}")
     for key in sorted(current):
         print(f"{key}: {current[key]}")
     print(f"index_freshness: {freshness(meta, current)}")
@@ -238,32 +261,100 @@ def cmd_file(args):
             if regex.search(text):
                 filtered.append(row)
         rows = filtered[: args.limit] if args.limit else filtered
-    print_rows(rows, ["path", "lang", "size"])
+    print_rows(rows, ["path", "lang", "size", "in_compile_db"])
 
 
-def cmd_symbol(args):
+def cmd_symbols(args):
     workspace = workspace_path(args.workspace)
     conn = connect(resolve_db(workspace, args.db))
-    print_rows(fetch_symbols(conn, args.name, args.limit), ["name", "kind", "path", "line", "container", "signature"])
+    rows = fetch_symbols(conn, args.name, args.limit)
+    print_rows(rows, ["name", "kind", "path", "line", "column", "is_definition", "signature", "usr"])
+
+
+def cmd_def(args):
+    workspace = workspace_path(args.workspace)
+    conn = connect(resolve_db(workspace, args.db))
+    rows = fetch_symbols(conn, args.term, args.limit, definitions_only=True)
+    if not rows:
+        rows = fetch_symbols(conn, args.term, args.limit)
+    print_rows(rows, ["name", "kind", "path", "line", "column", "is_definition", "signature", "usr"])
+
+
+def print_ambiguous_refs(candidates):
+    print("歧义符号：refs <name> 匹配多个 USR，请改用 refs <usr>。候选：")
+    for row in candidates:
+        print(f"{row['usr']} | {row['name']} | {row['kind']} | {row['path']}:{row['line']}:{row['column']} | def={row['is_definition']} | {row['signature']}")
 
 
 def cmd_refs(args):
     workspace = workspace_path(args.workspace)
     conn = connect(resolve_db(workspace, args.db))
-    rows = conn.execute(
-        """
-        SELECT name, path, line, context FROM refs
-        WHERE name = ?
-        ORDER BY path, line
-        LIMIT ?
-        """,
-        (args.name, args.limit),
-    ).fetchall()
-    out = [dict(row) for row in rows]
-    if len(out) < args.limit and not args.no_rg:
-        out.extend(live_rg_refs(conn, workspace, args.name, args.limit - len(out)))
-    for row in out[: args.limit]:
-        print(f"{row['path']}:{row['line']}: {row['context']}")
+    candidates = exact_symbol_candidates(conn, args.term, args.limit)
+    exact_usr = conn.execute("SELECT 1 FROM symbols WHERE usr = ? LIMIT 1", (args.term,)).fetchone()
+    if exact_usr:
+        target_usr = args.term
+    else:
+        usrs = symbol_usrs_for_name(conn, args.term, args.limit + 1)
+        if len(usrs) > 1:
+            if len(distinct_usrs(candidates)) < len(usrs):
+                candidates = exact_symbol_candidates(conn, args.term, max(args.limit, len(usrs)))
+            print_ambiguous_refs(candidates)
+            return
+        target_usr = usrs[0] if usrs else ""
+
+    if target_usr:
+        rows = conn.execute(
+            """
+            SELECT referenced_usr, name, kind, path, line, column, context
+            FROM refs
+            WHERE referenced_usr = ?
+            ORDER BY path, line, column
+            LIMIT ?
+            """,
+            (target_usr, args.limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT referenced_usr, name, kind, path, line, column, context
+            FROM refs
+            WHERE name = ?
+            ORDER BY path, line, column
+            LIMIT ?
+            """,
+            (args.term, args.limit),
+        ).fetchall()
+    for row in rows:
+        print(f"{row['path']}:{row['line']}:{row['column']}: {row['name']} [{row['kind']}] {row['context']}")
+
+
+def cmd_diagnostics(args):
+    workspace = workspace_path(args.workspace)
+    conn = connect(resolve_db(workspace, args.db))
+    path = normalize_path(workspace, args.path) if args.path else ""
+    if path:
+        rows = conn.execute(
+            """
+            SELECT path, line, column, severity, message
+            FROM diagnostics
+            WHERE path = ? OR path LIKE ?
+            ORDER BY severity DESC, path, line, column
+            LIMIT ?
+            """,
+            (path, f"%{path}%", args.limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT path, line, column, severity, message
+            FROM diagnostics
+            ORDER BY severity DESC, path, line, column
+            LIMIT ?
+            """,
+            (args.limit,),
+        ).fetchall()
+    for row in rows:
+        print(f"{row['path'] or '<unknown>'}:{row['line'] or 0}:{row['column'] or 0}: severity={row['severity']} {row['message']}")
 
 
 def cmd_tests(args):
@@ -316,45 +407,72 @@ def cmd_route(args):
     print(f"{row['skill']} | pattern={row['pattern']} | {row['reason']}")
 
 
+def nearby_symbols(conn, path: str, start: int, end: int, limit: int):
+    margin_start = max(1, start - 20)
+    margin_end = end + 20
+    return conn.execute(
+        """
+        SELECT name, kind, path, line, column, is_definition, COALESCE(signature, '') AS signature, COALESCE(usr, '') AS usr
+        FROM symbols
+        WHERE path = ?
+          AND (
+            line BETWEEN ? AND ?
+            OR (? BETWEEN COALESCE(extent_start_line, line) AND COALESCE(extent_end_line, line))
+            OR (? BETWEEN COALESCE(extent_start_line, line) AND COALESCE(extent_end_line, line))
+          )
+        ORDER BY
+          CASE WHEN line <= ? AND COALESCE(extent_end_line, line) >= ? THEN 0 ELSE 1 END,
+          ABS(line - ?), is_definition DESC, line
+        LIMIT ?
+        """,
+        (path, margin_start, margin_end, start, end, start, start, start, limit),
+    ).fetchall()
+
+
+def resolve_context_target(conn, workspace: Path, term: str, limit: int):
+    path, start, end = split_location(workspace, term)
+    if start is not None:
+        return path, start, end, []
+    if (workspace / path).exists():
+        return path, 1, 80, []
+    rows = fetch_symbols(conn, term, limit)
+    if not rows:
+        return path, None, None, []
+    row = rows[0]
+    return row["path"], max(1, int(row["line"]) - 8), int(row["line"]) + 8, rows
+
+
 def cmd_context(args):
     workspace = workspace_path(args.workspace)
     conn = connect(resolve_db(workspace, args.db))
-    term_path, start, end = split_location(workspace, args.term)
-    symbol_rows = []
-    path = term_path
-    if not (workspace / path).exists():
-        symbol_rows = fetch_symbols(conn, args.term, args.limit)
-        if symbol_rows:
-            path = symbol_rows[0]["path"]
-            start = max(1, int(symbol_rows[0]["line"]) - args.window)
-            end = int(symbol_rows[0]["line"]) + args.window
-    elif start is None:
-        start, end = 1, min(args.window * 2 + 1, 80)
-    if args.pattern and (workspace / path).exists():
+    path, start, end, symbol_rows = resolve_context_target(conn, workspace, args.term, args.limit)
+    if args.pattern and path and (workspace / path).exists():
         line = find_pattern_line(workspace, path, args.pattern)
         if line:
             start = max(1, line - args.window)
             end = line + args.window
+    if start is None or end is None:
+        print(f"未找到上下文目标: {args.term}")
+        return
+    if not symbol_rows:
+        symbol_rows = nearby_symbols(conn, path, start, end, args.limit)
     print("== 路由 ==")
     row = route_for(conn, path)
     print(f"{row['skill']} | pattern={row['pattern']} | {row['reason']}")
     print("== 符号 ==")
-    if symbol_rows:
-        print_rows(symbol_rows, ["name", "kind", "path", "line", "container", "signature"])
-    else:
-        rows = conn.execute(
-            "SELECT name, kind, path, line, COALESCE(container, '') AS container, COALESCE(signature, '') AS signature FROM symbols WHERE path = ? ORDER BY line LIMIT ?",
-            (path, args.limit),
-        ).fetchall()
-        print_rows(rows, ["name", "kind", "path", "line", "container", "signature"])
+    print_rows(symbol_rows, ["name", "kind", "path", "line", "column", "is_definition", "signature"])
     print("== 源码 ==")
-    if start and end:
-        source_window(workspace, path, start, end)
+    source_window(workspace, path, max(1, start - args.window), end + args.window)
     print("== 引用 ==")
     if symbol_rows:
-        first = symbol_rows[0]["name"]
-        for ref in live_rg_refs(conn, workspace, first, min(args.limit, 10)):
-            print(f"{ref['path']}:{ref['line']}: {ref['context']}")
+        target_usr = symbol_rows[0]["usr"]
+        if target_usr:
+            rows = conn.execute(
+                "SELECT name, kind, path, line, column, context FROM refs WHERE referenced_usr = ? ORDER BY path, line LIMIT ?",
+                (target_usr, min(args.limit, 10)),
+            ).fetchall()
+            for ref in rows:
+                print(f"{ref['path']}:{ref['line']}:{ref['column']}: {ref['name']} [{ref['kind']}] {ref['context']}")
     print("== 测试 ==")
     cmd_tests(argparse.Namespace(workspace=args.workspace, db=args.db, term=Path(path).stem, limit=5))
     print("== commits ==")
@@ -362,7 +480,7 @@ def cmd_context(args):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="查询目标无关的源码索引，供二进制软件漏洞审计使用。")
+    parser = argparse.ArgumentParser(description="查询面向 C/C++ 审计的 libclang 语义索引。")
     parser.add_argument("--workspace", default=".", help="目标工作区根目录。")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite 索引路径。")
     sub = parser.add_subparsers(required=True)
@@ -370,22 +488,33 @@ def build_parser():
     p = sub.add_parser("meta")
     p.set_defaults(func=cmd_meta)
 
-    p = sub.add_parser("file")
-    p.add_argument("term", nargs="?", default="")
-    p.add_argument("--pattern")
-    p.add_argument("--limit", type=int, default=50)
-    p.set_defaults(func=cmd_file)
+    for name in ("files", "file"):
+        p = sub.add_parser(name)
+        p.add_argument("term", nargs="?", default="")
+        p.add_argument("--pattern")
+        p.add_argument("--limit", type=int, default=50)
+        p.set_defaults(func=cmd_file)
 
-    p = sub.add_parser("symbol")
-    p.add_argument("name")
+    for name in ("symbols", "symbol"):
+        p = sub.add_parser(name)
+        p.add_argument("name")
+        p.add_argument("--limit", type=int, default=20)
+        p.set_defaults(func=cmd_symbols)
+
+    p = sub.add_parser("def")
+    p.add_argument("term")
     p.add_argument("--limit", type=int, default=20)
-    p.set_defaults(func=cmd_symbol)
+    p.set_defaults(func=cmd_def)
 
     p = sub.add_parser("refs")
-    p.add_argument("name")
+    p.add_argument("term")
     p.add_argument("--limit", type=int, default=20)
-    p.add_argument("--no-rg", action="store_true")
     p.set_defaults(func=cmd_refs)
+
+    p = sub.add_parser("diagnostics")
+    p.add_argument("path", nargs="?", default="")
+    p.add_argument("--limit", type=int, default=50)
+    p.set_defaults(func=cmd_diagnostics)
 
     p = sub.add_parser("tests")
     p.add_argument("term", nargs="?", default="")
