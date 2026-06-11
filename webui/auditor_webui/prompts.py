@@ -21,7 +21,7 @@ Session 类型: {session_type}
 必须遵守:
 - 阅读并遵守 {CONFIG.agents_path}。
 - 当前进程工作目录就是目标工作区，所有产物优先保存在该目录内。
-- 阅读并遵守 ./init.md、./bugs.md 和 ./confirm.md。
+- 阅读并遵守 ./init.md；使用 $bug-hunting 指导漏洞挖掘，候选漏洞落地时使用 $bug-confirming。
 - 持续维护 ./archives/known_findings.md，格式必须是固定四列表格: summary、bug type、security rating、source files。
 - security rating 只能使用 low、medium、high；不确定时先记录 unknown 风险描述但不要编造结论。
 - 如果任务没有完成，不要只做泛泛总结；继续推进最有价值的审计路径。

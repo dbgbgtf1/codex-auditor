@@ -63,8 +63,6 @@ python3 manager/manager.py [--config manager/config.json] reset
   templates/
   foo/
     init.md
-    bugs.md
-    confirm.md
     code_browser/
     verify/
     report_template/
@@ -88,6 +86,8 @@ cp {workspace_root}/templates/ -r {workspace_root}/{target}
 ```
 
 若相同说明已存在于 `init.md`，不会重复追加。
+
+漏洞挖掘与候选落地流程由 Codex skill 提供：`$bug-hunting` 和 `$bug-confirming`。
 
 然后在 `{workspace_root}/{target}` 下运行 `codex_command`，stdin 为生成的 prompt：
 
