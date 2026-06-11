@@ -307,7 +307,7 @@ select:focus {
 
 .session-leaf {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 12px;
+  grid-template-columns: minmax(0, 1fr) 12px;
   align-items: center;
   gap: 8px;
   padding: 7px 8px;
@@ -315,18 +315,6 @@ select:focus {
 
 .session-leaf.active {
   background: color-mix(in srgb, var(--target-color) 13%, var(--surface));
-}
-
-.session-type {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  background: var(--surface-soft);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
 }
 
 .status-dot {
@@ -448,6 +436,10 @@ td:nth-child(3) {
   color: var(--danger);
 }
 
+.repair-icon {
+  stroke: #d92d20;
+}
+
 .severity.high {
   color: #fff;
   background: #b62222;
@@ -515,12 +507,6 @@ td:nth-child(3) {
 .message.system .bubble {
   background: var(--bubble-system);
   color: var(--muted);
-}
-
-.message-time {
-  margin-top: 6px;
-  color: var(--muted);
-  font-size: 11px;
 }
 
 .message-form {

@@ -647,6 +647,33 @@ def add_message(session_id: int, role: str, content: str, kind: str = "message")
         conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (timestamp, session_id))
 
 
+def upsert_assistant_message(session_id: int, message_id: int | None, content: str) -> int | None:
+    content = content.strip()
+    if not content:
+        return message_id
+    timestamp = now_iso()
+    with connect_db() as conn:
+        if message_id is not None:
+            row = conn.execute(
+                "SELECT 1 FROM messages WHERE id = ? AND session_id = ? AND role = 'assistant'",
+                (message_id, session_id),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE messages SET content = ? WHERE id = ?",
+                    (content, message_id),
+                )
+                conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (timestamp, session_id))
+                return message_id
+        cur = conn.execute(
+            "INSERT INTO messages(session_id, role, content, kind, created_at) VALUES (?, 'assistant', ?, 'message', ?)",
+            (session_id, content, timestamp),
+        )
+        conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (timestamp, session_id))
+        inserted_id = int(cur.lastrowid or 0)
+    return inserted_id or None
+
+
 def list_messages(session_id: int, after_id: int = 0, limit: int = 300) -> list[RowDict]:
     with connect_db() as conn:
         rows = conn.execute(

@@ -9,7 +9,7 @@ from typing import TypedDict
 from .schema import SECURITY_RATINGS, JsonObject, JsonValue, RowDict, row_str
 from .workspace import atomic_write_text
 
-HEADERS = ("summary", "bug type", "security rating", "source files")
+HEADERS = ("总结", "漏洞类型", "安全评分", "源文件")
 
 
 class FindingRow(TypedDict):

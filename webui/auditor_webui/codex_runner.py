@@ -21,6 +21,7 @@ from .database import (
     now_iso,
     set_run_event_log_path,
     update_run_result,
+    upsert_assistant_message,
 )
 from .prompts import base_prompt
 from .schema import (
@@ -234,6 +235,7 @@ def agent_worker(session_id: int, run_id: int, prompt: str) -> None:
     error: str | None = None
     discovered_session_id: str | None = None
     assistant_messages: list[str] = []
+    assistant_message_id: int | None = None
     stop_requested = False
     try:
         proc = subprocess.Popen(
@@ -266,7 +268,7 @@ def agent_worker(session_id: int, run_id: int, prompt: str) -> None:
                 message = extract_assistant_message(event)
                 if message:
                     assistant_messages.append(message)
-                    add_message(session_id, "assistant", message)
+                    assistant_message_id = upsert_assistant_message(session_id, assistant_message_id, message)
         returncode = proc.wait()
     except OSError as exc:
         error = f"无法启动 codex: {exc}"

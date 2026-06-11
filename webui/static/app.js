@@ -15,8 +15,6 @@ const els = {
   vulnerabilityMeta: document.getElementById("vulnerabilityMeta"),
   vulnerabilityRows: document.getElementById("vulnerabilityRows"),
   refreshVulnerabilities: document.getElementById("refreshVulnerabilities"),
-  chatTitle: document.getElementById("chatTitle"),
-  chatMeta: document.getElementById("chatMeta"),
   messages: document.getElementById("messages"),
   messageForm: document.getElementById("messageForm"),
   messageInput: document.getElementById("messageInput"),
@@ -91,6 +89,10 @@ function currentSession() {
 
 function isBusySession(session) {
   return session?.status === "running";
+}
+
+function sessionDisplayTitle(session) {
+  return `${session.session_type} · ${session.status}`;
 }
 
 function setSelected(targetId, sessionId, persist = true) {
@@ -174,9 +176,8 @@ function renderTree() {
       item.className = `session-leaf${Number(session.id) === Number(state.selectedSessionId) ? " active" : ""}`;
       item.addEventListener("click", () => setSelected(target.id, session.id));
       const statusClass = session.status === "running" ? " running" : "";
-      item.innerHTML = `<span class="session-type"></span><span class="session-text"></span><span class="status-dot${statusClass}"></span>`;
-      item.querySelector(".session-type").textContent = session.session_type === "mining" ? "M" : "D";
-      item.querySelector(".session-text").textContent = `${session.name} · ${session.status}`;
+      item.innerHTML = `<span class="session-text"></span><span class="status-dot${statusClass}"></span>`;
+      item.querySelector(".session-text").textContent = sessionDisplayTitle(session);
       sessions.appendChild(item);
     });
     group.appendChild(sessions);
@@ -185,10 +186,7 @@ function renderTree() {
 }
 
 function renderChatShell() {
-  const target = currentTarget();
   const session = currentSession();
-  els.chatTitle.textContent = session ? session.name : "对话";
-  els.chatMeta.textContent = session ? `${target?.name || ""} · ${session.session_type} · ${session.status}` : "未选择 session";
   if (!session) {
     els.messageInput.disabled = true;
     els.sendButton.disabled = true;
@@ -207,10 +205,7 @@ function renderMessages() {
   const nearBottom = els.messages.scrollTop + els.messages.clientHeight >= els.messages.scrollHeight - 80;
   els.messages.innerHTML = "";
   const session = currentSession();
-  const visible = state.messages.filter(
-    (message) => ["user", "assistant", "system"].includes(message.role)
-      && !["run", "vulnerability", "tool_call", "event"].includes(message.kind),
-  );
+  const visible = normalizeVisibleMessages(state.messages);
   if (!visible.length && session?.status !== "running") {
     const empty = document.createElement("div");
     empty.className = "message system";
@@ -226,15 +221,30 @@ function renderMessages() {
     const kind = message.kind && message.kind !== "message" ? `[${message.kind}] ` : "";
     const content = document.createElement("div");
     content.textContent = `${kind}${message.content}`;
-    const time = document.createElement("div");
-    time.className = "message-time";
-    time.textContent = formatTime(message.created_at);
-    bubble.append(content, time);
+    bubble.appendChild(content);
     item.appendChild(bubble);
     els.messages.appendChild(item);
   });
   if (session?.status === "running") appendThinkingMessage(session);
   if (nearBottom) els.messages.scrollTop = els.messages.scrollHeight;
+}
+
+function normalizeVisibleMessages(messages) {
+  const visible = messages.filter(
+    (message) => ["user", "assistant", "system"].includes(message.role)
+      && !["run", "vulnerability", "tool_call", "event"].includes(message.kind),
+  );
+  return visible.reduce((result, message) => {
+    const previous = result[result.length - 1];
+    const isAssistantMessage = message.role === "assistant" && (!message.kind || message.kind === "message");
+    const wasAssistantMessage = previous?.role === "assistant" && (!previous.kind || previous.kind === "message");
+    if (isAssistantMessage && wasAssistantMessage) {
+      result[result.length - 1] = message;
+    } else {
+      result.push(message);
+    }
+    return result;
+  }, []);
 }
 
 function appendThinkingMessage(session) {
@@ -258,9 +268,19 @@ function updateThinkingMessage() {
 }
 
 function thinkingText(session) {
-  const startedAt = new Date(session.updated_at || session.created_at || Date.now()).getTime();
+  const startedAt = latestUserMessageStartedAt() || new Date(session.updated_at || session.created_at || Date.now()).getTime();
   const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
   return `已运行 ${formatDuration(elapsedSeconds)}`;
+}
+
+function latestUserMessageStartedAt() {
+  for (let index = state.messages.length - 1; index >= 0; index -= 1) {
+    const message = state.messages[index];
+    if (message.role !== "user" || !message.created_at) continue;
+    const startedAt = new Date(message.created_at).getTime();
+    if (!Number.isNaN(startedAt)) return startedAt;
+  }
+  return null;
 }
 
 function formatDuration(totalSeconds) {
@@ -281,7 +301,7 @@ function renderVulnerabilities(payload) {
     button.className = "icon-button repair-button";
     button.title = "请求 AI 修复汇总";
     button.setAttribute("aria-label", "请求 AI 修复汇总");
-    button.innerHTML = iconSvg("wrench");
+    button.innerHTML = repairWrenchSvg();
     button.addEventListener("click", repairVulnerabilities);
     row.firstChild.append(document.createElement("br"), button);
     els.vulnerabilityRows.appendChild(row);
@@ -441,13 +461,6 @@ async function poll() {
   }
 }
 
-function formatTime(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString("zh-CN", { hour12: false });
-}
-
 function openTargetModal() {
   els.targetForm.reset();
   els.targetExpandBox.classList.add("hidden");
@@ -529,6 +542,15 @@ function iconSvg(name) {
     sun: '<circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>',
   };
   return `<svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
+}
+
+function repairWrenchSvg() {
+  return `
+    <svg class="button-icon repair-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M15.4 5.1a5 5 0 0 0-5.8-1.2l3 3-3.1 3.1-3-3a5 5 0 0 0 6.4 6.4l5.8 5.8a2.1 2.1 0 0 0 3-3l-5.8-5.8a5 5 0 0 0-.5-5.3Z"></path>
+      <path d="M18.4 17.6l1.2 1.2"></path>
+    </svg>
+  `;
 }
 
 els.themeToggle.addEventListener("click", async () => {
